@@ -23,12 +23,37 @@ __global__ void apply_window(double *signal, int signal_len, int window_len, int
     int thread_id = threadIdx.x;
 
     int iStart = block_id*hop;
-    if(iStart+window_len>=signal_len) return;
+    if(iStart+window_len>=signal_len || thread_id>=window_len || block_id>=4036) return;
+
 
     double window_multiplier = 0.5 * (1 - cos(2*PI*thread_id/(window_len-1)));
 
     // windowed[i] = window_multiplier * signal[iStart + thread_id];
-    // signal[i] = 0;
+    if(block_id>4034 ) signal[thread_id] = iStart;
+    // else signal[thread_id] = 0
+
+    complexSignal[i].x = window_multiplier * signal[iStart + thread_id];
+    complexSignal[i].y = 0;
+
+    //iterate over block
+}
+
+__global__ void apply_log(cufftComplex *complexSignal){
+    // window size is 1024
+    int i = blockIdx.x*blockDim.x + threadIdx.x;
+    int block_id = blockIdx.x;
+    int thread_id = threadIdx.x;
+
+    int iStart = block_id*hop;
+    if(iStart+window_len>=signal_len || thread_id>=window_len || block_id>=4036) return;
+
+
+    double window_multiplier = 0.5 * (1 - cos(2*PI*thread_id/(window_len-1)));
+
+    // windowed[i] = window_multiplier * signal[iStart + thread_id];
+    if(block_id>4034 ) signal[thread_id] = iStart;
+    // else signal[thread_id] = 0
+
     complexSignal[i].x = window_multiplier * signal[iStart + thread_id];
     complexSignal[i].y = 0;
 
@@ -64,9 +89,10 @@ int main( int argc, char **argv )
     
     int nFFT = 1024;
     int hop = floor(nFFT/4);
-    int nFrames = floor(signal_len/hop) -1;
+    int nFrames = floor(signal_len/hop);
 
     std::cout<<nFrames<<" frames, "<<std::endl;
+    std::cout<<hop<<" hop"<<std::endl;
 
     //configure cuFFT
     cufftHandle plan;
@@ -126,15 +152,19 @@ int main( int argc, char **argv )
 
     // copy the fft  result back to the host 
     cudaMemcpy(complex_signal_windowed, gpu_complex_signal_windowed, nFrames*nFFT*sizeof(cufftComplex), cudaMemcpyDeviceToHost);
+    cudaMemcpy(signal, gpu_signal, signal_len*sizeof(double), cudaMemcpyDeviceToHost);
     cudaThreadSynchronize();
 
     std::cout<<"Time elapsed: "<<elapsed<<std::endl;
 
-    for(int i=0; i<500; i++){
+    for(int i=0; i<1024; i++){
         std::string mid = complex_signal_windowed[i].y>=0? "\t+ " :"\t- ";
 
-        std::cout<<complex_signal_windowed[i].x<< mid << std::fabs(complex_signal_windowed[i].y)<<"j"<<std::endl;
-    }
+        std::cout<<i+1<<":\t"<<complex_signal_windowed[i].x<< mid << std::fabs(complex_signal_windowed[i].y)<<"j"<<std::endl;
+    }    
+    // for(int i=0; i<1024; i++){
+    //     std::cout<<signal[i]<<std::endl;
+    // }
 
     return 0;
 }
