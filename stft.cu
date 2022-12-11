@@ -23,7 +23,7 @@ __global__ void apply_window(double *signal, int signal_len, int window_len, int
     int thread_id = threadIdx.x;
 
     int iStart = block_id*hop;
-    if(iStart+window_len>=signal_len || thread_id>=window_len || block_id>=4036) return;
+    if(iStart+window_len>=signal_len || thread_id>=window_len || block_id>4035) return;
 
 
     double window_multiplier = 0.5 * (1 - cos(2*PI*thread_id/(window_len-1)));
@@ -38,24 +38,21 @@ __global__ void apply_window(double *signal, int signal_len, int window_len, int
     //iterate over block
 }
 
-__global__ void apply_log(cufftComplex *complexSignal){
+__global__ void apply_log(cufftComplex *complexSignal, double *realdBSignal, int window_len){
     // window size is 1024
     int i = blockIdx.x*blockDim.x + threadIdx.x;
     int block_id = blockIdx.x;
     int thread_id = threadIdx.x;
 
-    int iStart = block_id*hop;
-    if(iStart+window_len>=signal_len || thread_id>=window_len || block_id>=4036) return;
+    if(thread_id>=window_len/2 || block_id>=4036) return;
 
 
-    double window_multiplier = 0.5 * (1 - cos(2*PI*thread_id/(window_len-1)));
-
-    // windowed[i] = window_multiplier * signal[iStart + thread_id];
-    if(block_id>4034 ) signal[thread_id] = iStart;
+    // if(block_id>4034 ) signal[thread_id] = iStart;
     // else signal[thread_id] = 0
+    double x = complexSignal[i].x;
+    double y = complexSignal[i].y;
 
-    complexSignal[i].x = window_multiplier * signal[iStart + thread_id];
-    complexSignal[i].y = 0;
+    realdBSignal[i] = 20*log10f(sqrt(x*x + y*y));
 
     //iterate over block
 }
@@ -85,14 +82,14 @@ int main( int argc, char **argv )
         if(count_total++%2 ==0) signal[signal_len++] = num;
     }
 
-    std::cout<<"Signal Length: "<<signal_len<<std::endl;
+    // std::cout<<"Signal Length: "<<signal_len<<std::endl;
     
     int nFFT = 1024;
     int hop = floor(nFFT/4);
-    int nFrames = floor(signal_len/hop);
+    int nFrames = floor(signal_len/hop)-1;
 
-    std::cout<<nFrames<<" frames, "<<std::endl;
-    std::cout<<hop<<" hop"<<std::endl;
+    // std::cout<<nFrames<<" frames, "<<std::endl;
+    // std::cout<<hop<<" hop"<<std::endl;
 
     //configure cuFFT
     cufftHandle plan;
@@ -100,7 +97,6 @@ int main( int argc, char **argv )
     // begin parallel execution section
     // This takes a few seconds to initialize the runtime
     cudaThreadSynchronize(); 
-    clock_t start = clock();
 
 
     double *gpu_signal;
@@ -110,6 +106,7 @@ int main( int argc, char **argv )
 
     double *gpu_fft_result;
     double *gpu_db_result;
+    double * db_result = (double *)malloc((int)nFrames/2*nFFT*sizeof(double));
 
     double *gpu_window;
 
@@ -124,25 +121,19 @@ int main( int argc, char **argv )
 
     cudaMemcpy(gpu_signal, signal, signal_len * sizeof(double), cudaMemcpyHostToDevice);
 
-    // setup the fft plan
-    cufftPlan1d(&plan, signal_len, CUFFT_C2C, 1);
-
-    // appply hanning window
-    apply_window <<< nFrames, nFFT >>> (gpu_signal, signal_len, nFFT, hop, gpu_complex_signal_windowed);
-    
-    
     // compute FFT in blocks
     int rank=1;
     int batch=nFrames; 
     int size_per=nFFT;
 
-    // cufftExecC2C(plan, gpu_complex_signal, gpu_complex_signal, CUFFT_FORWARD);
-    // cufftPlanMany(&plan, rank, size_per, NULL, hop, idist,
-    //     NULL, hop, odist, CUFFT_C2C, batch);
-
     cufftPlan1d(&plan, size_per, CUFFT_C2C, batch);
 
+    clock_t start = clock();
+
+    // appply hanning window
+    apply_window <<< nFrames, nFFT >>> (gpu_signal, signal_len, nFFT, hop, gpu_complex_signal_windowed);
     cufftExecC2C(plan, gpu_complex_signal_windowed, gpu_complex_signal_windowed, CUFFT_FORWARD);
+    apply_log <<< nFrames, nFFT/2 >>> (gpu_complex_signal_windowed, gpu_db_result, nFFT);
 
     cudaThreadSynchronize();
     clock_t end = clock();
@@ -153,17 +144,25 @@ int main( int argc, char **argv )
     // copy the fft  result back to the host 
     cudaMemcpy(complex_signal_windowed, gpu_complex_signal_windowed, nFrames*nFFT*sizeof(cufftComplex), cudaMemcpyDeviceToHost);
     cudaMemcpy(signal, gpu_signal, signal_len*sizeof(double), cudaMemcpyDeviceToHost);
+    cudaMemcpy(db_result, gpu_db_result, (int)nFrames/2*nFFT*sizeof(double), cudaMemcpyDeviceToHost);
     cudaThreadSynchronize();
 
     std::cout<<"Time elapsed: "<<elapsed<<std::endl;
 
-    for(int i=0; i<1024; i++){
-        std::string mid = complex_signal_windowed[i].y>=0? "\t+ " :"\t- ";
+    // for(int i=0; i<2048; i++){
+    //     std::string mid = complex_signal_windowed[i].y>=0? "\t+ " :"\t- ";
 
-        std::cout<<i+1<<":\t"<<complex_signal_windowed[i].x<< mid << std::fabs(complex_signal_windowed[i].y)<<"j"<<std::endl;
-    }    
+    //     std::cout<<i+1<<":\t"<<complex_signal_windowed[i].x<< mid << std::fabs(complex_signal_windowed[i].y)<<"j"<<std::endl;
+    // }    
     // for(int i=0; i<1024; i++){
     //     std::cout<<signal[i]<<std::endl;
+    // }
+    // std::cout<<nFrames<<std::endl;
+    // for(int i=0; i<(int)nFrames*nFFT; i++){
+    //     std::string mid = complex_signal_windowed[i].y>=0? " + " :" - ";
+    //     std::cout<<complex_signal_windowed[i].x<< mid<< std::fabs(complex_signal_windowed[i].y)<<"i"<<std::endl;
+    //     // std::cout<<db_result[i]<<std::endl;
+    //     // std::cout<<std::endl;
     // }
 
     return 0;
